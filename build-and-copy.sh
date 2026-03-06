@@ -66,7 +66,12 @@ copy_to_host() {
 
 # try_download_wheels TAG PREFIX
 # Downloads wheels matching PREFIX*.whl from a GitHub release.
-# Skips files that are already present and up to date (by remote updated_at vs local mtime).
+# Skip conditions (either is sufficient):
+#   1. Commit hash in release name matches .wheels/.{PREFIX}_commit (primary check).
+#   2. All local wheels are newer than the latest GitHub asset (freshly built).
+# Only downloads a file when the remote asset is newer than the local copy AND
+# the above skip conditions are not met.
+# On success, persists the release commit hash to .wheels/.{PREFIX}_commit.
 # Returns 0 if all matching wheels are now available, 1 on any error.
 try_download_wheels() {
     local TAG="$1"
@@ -92,7 +97,7 @@ try_download_wheels() {
 
     local DOWNLOAD_LIST
     DOWNLOAD_LIST=$(echo "$RELEASE_JSON" | python3 -c '
-import json, sys, os
+import json, sys, os, re
 from datetime import datetime, timezone
 
 wheels_dir, prefix = sys.argv[1], sys.argv[2]
@@ -103,6 +108,31 @@ assets = [a for a in data.get("assets", [])
 if not assets:
     print("No assets found matching prefix: " + prefix, file=sys.stderr)
     sys.exit(1)
+
+# Extract commit hash from the release name:
+#   FlashInfer: "Prebuilt FlashInfer Wheels (0.6.5-124a2d32-d20260305) - DGX Spark Only"
+#   vLLM:       "Prebuilt vLLM Wheels (0.16.1rc1.dev296+ga73af584f.d20260305.cu131) - DGX Spark only"
+release_name = data.get("name", "")
+commit_hash = None
+if prefix.startswith("flashinfer"):
+    m = re.search(r"\([\d.]+\w*-([0-9a-f]{6,})-d\d{8}\)", release_name, re.IGNORECASE)
+    if m:
+        commit_hash = m.group(1)
+else:
+    m = re.search(r"\+g([0-9a-f]{6,})\.", release_name, re.IGNORECASE)
+    if m:
+        commit_hash = m.group(1)
+
+# Compare against the locally stored commit hash
+commit_file = os.path.join(wheels_dir, "." + prefix + "-commit")
+local_commit = None
+if os.path.exists(commit_file):
+    with open(commit_file) as f:
+        local_commit = f.read().strip()
+
+if commit_hash and local_commit and local_commit[:len(commit_hash)] == commit_hash:
+    print("Commit hash matches (" + commit_hash + ") — wheels are up to date.", file=sys.stderr)
+    sys.exit(0)
 
 newest_remote_ts = max(
     datetime.strptime(a["updated_at"], "%Y-%m-%dT%H:%M:%SZ")
@@ -119,15 +149,38 @@ local_wheels = [
 if local_wheels and all(os.path.getmtime(p) >= newest_remote_ts for p in local_wheels):
     sys.exit(0)
 
+downloads = []
 for a in assets:
     local_path = os.path.join(wheels_dir, a["name"])
     remote_ts = datetime.strptime(a["updated_at"], "%Y-%m-%dT%H:%M:%SZ") \
                     .replace(tzinfo=timezone.utc).timestamp()
     if not os.path.exists(local_path) or remote_ts > os.path.getmtime(local_path):
-        print(a["browser_download_url"] + " " + a["name"])
+        downloads.append(a["browser_download_url"] + " " + a["name"])
+
+if downloads:
+    if commit_hash:
+        print("#commit:" + commit_hash)
+    for d in downloads:
+        print(d)
 ' "$WHEELS_DIR" "$PREFIX") || return 1
 
     if [ -z "$DOWNLOAD_LIST" ]; then
+        echo "All $PREFIX wheels are up to date — skipping download."
+        return 0
+    fi
+
+    # Parse the optional '#commit:HASH' sentinel emitted by the Python script
+    local REMOTE_COMMIT=""
+    local DOWNLOAD_ENTRIES=""
+    while IFS= read -r LINE; do
+        if [[ "$LINE" == "#commit:"* ]]; then
+            REMOTE_COMMIT="${LINE#"#commit:"}"
+        elif [[ -n "$LINE" ]]; then
+            DOWNLOAD_ENTRIES+="$LINE"$'\n'
+        fi
+    done <<< "$DOWNLOAD_LIST"
+
+    if [ -z "$DOWNLOAD_ENTRIES" ]; then
         echo "All $PREFIX wheels are up to date — skipping download."
         return 0
     fi
@@ -162,9 +215,13 @@ for a in assets:
             rm -rf "$DL_BACKUP"
             return 1
         fi
-    done <<< "$DOWNLOAD_LIST"
+    done <<< "$DOWNLOAD_ENTRIES"
 
     rm -rf "$DL_BACKUP"
+    if [ -n "$REMOTE_COMMIT" ]; then
+        echo "$REMOTE_COMMIT" > "$WHEELS_DIR/.${PREFIX}-commit"
+        echo "Recorded $PREFIX commit hash: $REMOTE_COMMIT"
+    fi
     return 0
 }
 
