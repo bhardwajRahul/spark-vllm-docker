@@ -29,6 +29,9 @@ ENV UV_CACHE_DIR=/root/.cache/uv
 ENV UV_SYSTEM_PYTHON=1
 ENV UV_BREAK_SYSTEM_PACKAGES=1
 ENV UV_LINK_MODE=copy
+# Set timeouts
+ENV UV_HTTP_TIMEOUT=600
+ENV UV_HTTP_RETRIES=10
 
 # Set the base directory environment variable
 ENV VLLM_BASE_DIR=/workspace/vllm
