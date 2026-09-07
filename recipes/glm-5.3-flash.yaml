@@ -13,7 +13,8 @@ build_args:
 
 cluster_only: true
 
-mods: []
+mods:
+  - mods/instanttensor-hybrid-draft-loader
 
 defaults:
   port: 8000
@@ -26,7 +27,7 @@ defaults:
   max_num_seqs: 4
   max_num_batched_tokens: 4096
   num_speculative_tokens: 5
-  kv_cache_memory_bytes: 10G
+  kv_cache_memory_bytes: 8G
   gpu_memory_utilization: 0.87
 
 env:
@@ -66,7 +67,6 @@ command: |
     --linear-backend b12x \
     --no-enable-flashinfer-autotune \
     --load-format instanttensor \
-    --model-loader-extra-config '{{"instanttensor_copy":false}}' \
     --max-model-len {max_model_len} \
     --max-num-seqs {max_num_seqs} \
     --max-num-batched-tokens {max_num_batched_tokens} \
